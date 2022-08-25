@@ -1,0 +1,75 @@
+name: Test deployment using DevBranch instructions
+
+stages:
+  - deploy
+
+deploy:
+  image: alpine
+  stage: deploy
+  timeout: 5m
+  # Pipeline should continue running when a job fails, needed to run after_script
+  allow_failure: true
+  # Runs when there is a change in a branch "dev"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+  variables:
+    # Don't clone the repo
+    GIT_STRATEGY: none
+  script:
+    # Without this library not run portainerssh
+    - apk add libc6-compat
+    # Download Portainerssh 
+    - wget https://github.com/devbranch-vadym/portainerssh/releases/download/v1.6.0/portainerssh-linux-amd64-1.6.0.tar.gz
+    # Extracting the archive
+    - tar -xzf portainerssh-linux-amd64-*.tar.gz
+    # Copy to bin folder
+    - cp ./portainerssh /usr/local/bin/
+    # Make a directory for portainerssh config
+    - mkdir ~/.portainerssh/
+    # Add credential
+    - | 
+      echo api_url: "${PORTAINER_API_URL}" > ~/.portainerssh/config.yml
+      echo user: "${PORTAINER_USER}" >> ~/.portainerssh/config.yml
+      echo password: "${PORTAINER_PASS}" >> ~/.portainerssh/config.yml
+    # Get current commit
+    - |
+      TEMP=$(portainerssh ${CONTAINER_PHP} -c "git rev-parse HEAD")
+      echo $TEMP | sed "s/.*\.\.\. //g" > ./CURRENT_COMMIT.TXT
+      echo "Current commit $(cat ./CURRENT_COMMIT.TXT)"
+    # Create database dump
+    # This is the container make dumps the database, /backup.sh is located in the container
+    - portainerssh ${CONTAINER_DATABASE_DUMP} -c "/backup.sh" 
+    # Enable maintenance_mode
+    - portainerssh ${CONTAINER_PHP} -c "drush state:set system.maintenance_mode 1"
+    # Git checkout
+    - portainerssh ${CONTAINER_PHP} -c "bash -c 'git fetch && git checkout $CI_COMMIT_SHA'"
+    # Deploy
+    - |
+      portainerssh ${CONTAINER_PHP} -c "bash -c 'composer install -o --no-dev &&
+        drush cr &&
+        drush updb -y &&
+        drush cim -y &&
+        drush cr '"
+    # Disable maintenance_mode
+    - portainerssh ${CONTAINER_PHP} -c "drush state:set system.maintenance_mode 0"
+  after_script:
+    - >
+      if [ $CI_JOB_STATUS == 'success' ]; then
+        echo "Everything is fine"
+      else
+        echo "---== Enable maintenance_mode ==---" &&
+          portainerssh ${CONTAINER_PHP} -c "drush state:set system.maintenance_mode 1" &&
+        echo "---== Restore database ==---" &&
+          portainerssh ${CONTAINER_DATABASE_DUMP} -c "/restore.sh __latest__" &&
+        echo "---== Restore to the previous commit ==---" &&
+          portainerssh ${CONTAINER_PHP} -c "git checkout $(cat ./CURRENT_COMMIT.TXT)" &&
+        echo "---== Deploy ==---" &&
+          portainerssh ${CONTAINER_PHP} -c "bash -c 'composer install -o --no-dev && \
+            drush cr && \
+            drush updb -y && \
+            drush cim -y && \
+            drush cr '" &&
+        echo "---== Disable maintenance_mode ==---" &&
+          portainerssh ${CONTAINER_PHP} -c "drush state:set system.maintenance_mode 0"
+      fi
+
