@@ -1,5 +1,10 @@
 name: Test deployment using DevBranch instructions
 
+on:
+  push:
+    branches:
+      - master
+
 stages:
   - deploy
 
